@@ -12,7 +12,7 @@
 /*  optiboot project to the arduino project in "lumps."   */
 /*                                                        */
 /* Heavily optimised bootloader that is faster and        */
-/* smaller than the Arduino standard bootloader           */
+/* smaller than the Arduino standard bootloader           */  
 /*                                                        */
 /* Enhancements:                                          */
 /*   Fits in 512 bytes, saving 1.5K of code space         */
@@ -367,6 +367,7 @@ static inline void writebuffer(int8_t memtype, uint8_t *mybuff,
 static inline void read_mem(uint8_t memtype,
 			    uint16_t address, pagelen_t len);
 static void __attribute__((noinline)) do_spm(uint16_t address, uint8_t command, uint16_t data);
+static void __attribute__((noinline)) do_self(uint32_t address);
 
 #ifdef SOFT_UART
 void uartDelay() __attribute__ ((naked));
@@ -450,6 +451,9 @@ void pre_main(void) {
   asm volatile (
     "	rjmp	1f\n"
     "	rjmp	do_spm\n"
+#ifdef DOSELF
+    " rjmp  do_self\n"
+#endif
     "1:\n"
   );
 }
@@ -591,7 +595,7 @@ int main(void) {
       if ( AVR_OP_LOAD_EXT_ADDR == getch() ) {
         // get address
         getch();  // get '0'
-        RAMPZ = (RAMPZ & 0x01) | ((getch() << 1) & 0xff);  // get address and put it in RAPMZ
+        RAMPZ = (RAMPZ & 0x01) | ((getch() << 1) & 0xff);  // get address and put it in RAMPZ
         getNch(1); // get last '0'
         // response
         putch(0x00);
@@ -1038,3 +1042,94 @@ static void do_spm(uint16_t address, uint8_t command, uint16_t data) {
     }
 #endif
 }
+
+
+#if defined(DOSELF)
+uint8_t do_SPI(uint8_t in){ //quick and dirty SPI.transfer()  
+SPDR = in;
+while(!(SPSR & 1<<SPIF));
+return SPDR;
+}
+
+void do_RL(uint32 * adr, uint8_t * ch){
+ /* Read from SPI Flash W25QF64
+ *  adr points to ':' of converted Intel Hex file line, the flash is loaded with Binary values
+ *  ch becomes complete line, including checksum, checksum is not counted in L
+ * : L AA T d*L cksm
+ * ':'  - Line start sync, discarded
+ * L    - length of data section (bytes)
+ * AA   - Two byte address 
+ * d*L  - 'L' bytes of data
+ * cksum- checksum of all bytes (recalculated, not HID version)
+ */
+ 
+PORTB = PORTB &0xFE; // CS low  my SPI Flash is on D53, MEGA2560
+do_SPI(0x03); // read command
+do_SPI((uint8_t)(*adr>>16)&0xff); // A23..16
+do_SPI((uint8_t)(*adr>>8)&0xFF);  // A15..8
+do_SPI((uint8_t)(*adr)&0xff);       // A7..0
+do_SPI(0); // ':' skip, Verify?
+uint8_t j=0;
+ch[j++]=do_SPI(0); // length of current data field in line 
+uint8_t i = ch[j-1]+4; // len byte + (2)addr + (1)type +(1)cksm
+while(i>0){
+  ch[j++] = do_SPI(0);
+  i--;
+  }
+*adr = *adr + j + 2; // ':' + len
+PORTB= PORTB | 0x01; // CS HIGH
+}
+
+static void do_self(uint32_t adr){
+/* cs is pin for SPI slave control, Is Output, High,
+ * SPI must be inited correctly prior to call, adr is image location inside the SPI Flash
+ * image must be a converted format of an Intel hex file.
+ * interrupts off
+ *
+*/
+uint32_t objAdr = 0,extendA=0, oldPage=0,mask=~(SPM_PAGESIZE-1);
+uint8_t * ch[40]; // should actually never need more than 21 bytes 1+2+1+16+1
+bool dirty=false; // flush indicator
+RAMPZ=0; // shouldn't actually need this, but maybe?
+uint8_t x; // index variable to walk thru line buffer
+uint16_t w; // word to fill Flash buffer
+do{
+  do_RL(&adr,&ch); // read from SPI Flash, adr is updated byte call  
+  switch(ch[3]){ // Intel record type
+    case 0: // data record  L A A T (d*L) cksum
+      objAdr = ch[2];                   // parse off address offset
+      objAdr = (objAdr << 8) | ch[1];     // can address ever be ODD?
+      x=4;                            // index were data starts
+      while(ch[0]>0){
+        if(oldPage!=((objAdr+extendA)&mask)){// write the page
+          if(dirty){ // this first write address was not in page 0
+            do_spm((uint16_t)(oldPage&0xffff),__BOOT_PAGE_ERASE,0);
+            do_spm((uint16_t)(oldPage&0xffff),__BOOT_PAGE_WRITE,0);
+            }
+          oldPage = (objAdr+entendA)&mask;
+          RAMPZ =(oldPage>>16)&0xff; // set Extended address for Fill operations, and next erase/write
+          }
+        w = ch[x++];   // fill next word
+        w = w | (ch[x++]<<8);
+        ch[0] -= 2;  // count down for each byte processed,  CAN LENGTH ever be ODD?
+        do_spm((uint16_t)(objAdr&0xFFFF),_BOOT_PAGE_FILL,w);
+        objAdr += 2;
+        dirty=true;  // for Page_write
+        }
+      break;
+    case 1: // end of file
+      if(dirty){
+        do_spm(oldPage&0xffff),__BOOT_PAGE_ERASE,0);
+        do_spm(oldPage&0xffff),__BOOT_PAGE_WRITE,0);
+       }
+      appStart(1); // simulate Power-on Reset, do I need to worry about SP and other H/W init Status?
+      break;
+    case 2: // extended segment address L A A T d d cksum
+      extendA = ch[4]<<12;
+      break;
+    default :;
+    }// switch
+  }while(1);
+
+}
+#endif
