@@ -14,10 +14,25 @@ wildfire:
 	mv $(PROGRAM)_$(CHIP).lst $(PROGRAM)_$(TARGET).lst
 
 
-TargetV2: TARGET = $@
-TargetV2: CHIP = atmega2560
-TargetV2:
-	$(MAKE) $(CHIP) AVR_FREQ=16000000L LED=B5
-	mv $(PROGRAM)_$(CHIP).hex $(PROGRAM)_$(TARGET).hex
-	mv $(PROGRAM)_$(CHIP).lst $(PROGRAM)_$(TARGET).lst
+# Chip level TARGET V2s
+#
+TargetV2: TARGET = atmega2560
+TargetV2: MCU_TARGET = atmega2560
+TargetV2: CFLAGS += $(COMMON_OPTIONS) -DBIGBOOT -DDOSELF
+TargetV2: AVR_FREQ ?= 16000000L
+TargetV2: LDSECTIONS  = -Wl,--section-start=.text=0x3F800 -Wl,--section-start=.version=0x3fffe
+TargetV2: CFLAGS += $(UART_CMD)
+TargetV2: $(PROGRAM)_TargetV2.hex
+TargetV2: $(PROGRAM)_TargetV2.lst
 
+
+TargetV2_isp: atmega2560
+TargetV2_isp: TARGET = atmega2560
+TargetV2_isp: MCU_TARGET = atmega2560
+# 2048 byte boot, JTAG disabled
+TargetV2_isp: HFUSE ?= DD
+# Full Swing xtal (16MHz) 16KCK/14CK+65ms
+TargetV2_isp: LFUSE ?= F7
+# 2.7V brownout
+TargetV2_isp: EFUSE ?= FD
+TargetV2_isp: isp

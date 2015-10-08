@@ -367,7 +367,9 @@ static inline void writebuffer(int8_t memtype, uint8_t *mybuff,
 static inline void read_mem(uint8_t memtype,
 			    uint16_t address, pagelen_t len);
 static void __attribute__((noinline)) do_spm(uint16_t address, uint8_t command, uint16_t data);
+#if defined(DOSELF)
 static void __attribute__((noinline)) do_self(uint32_t address);
+#endif
 
 #ifdef SOFT_UART
 void uartDelay() __attribute__ ((naked));
@@ -451,8 +453,8 @@ void pre_main(void) {
   asm volatile (
     "	rjmp	1f\n"
     "	rjmp	do_spm\n"
-#ifdef DOSELF
-    " rjmp  do_self\n"
+#if defined(DOSELF)
+    "	rjmp	do_self\n"
 #endif
     "1:\n"
   );
@@ -499,6 +501,9 @@ int main(void) {
       if (ch & _BV(EXTRF)) 
           MCUSR = ~(_BV(WDRF));  // Clear WDRF because it was actually caused by bootloader
       appStart(ch);
+#if defined(DOSELF)
+			do_self(0); // never gets here
+#endif		
     }
   }
   
@@ -903,7 +908,7 @@ static inline void writebuffer(int8_t memtype, uint8_t *mybuff,
 {
     switch (memtype) {
     case 'E': // EEPROM
-#if defined(SUPPORT_EEPROM) || defined(BIGBOOT)
+#if defined(SUPPORT_EEPROM) || (defined(BIGBOOT) && !defined(DOSELF))
         while(len--) {
 	    eeprom_write_byte((uint8_t *)(address++), *mybuff++);
         }
@@ -1051,7 +1056,7 @@ while(!(SPSR & 1<<SPIF));
 return SPDR;
 }
 
-void do_RL(uint32 * adr, uint8_t * ch){
+void do_RL(uint32_t *adr, uint8_t ch[]){
  /* Read from SPI Flash W25QF64
  *  adr points to ':' of converted Intel Hex file line, the flash is loaded with Binary values
  *  ch becomes complete line, including checksum, checksum is not counted in L
@@ -1089,16 +1094,16 @@ static void do_self(uint32_t adr){
 */
 uint32_t objAdr = 0,extendA=0, oldPage=0,mask=~(SPM_PAGESIZE-1);
 uint8_t * ch[40]; // should actually never need more than 21 bytes 1+2+1+16+1
-bool dirty=false; // flush indicator
+uint8_t dirty=0; // flush indicator
 RAMPZ=0; // shouldn't actually need this, but maybe?
 uint8_t x; // index variable to walk thru line buffer
 uint16_t w; // word to fill Flash buffer
 do{
-  do_RL(&adr,&ch); // read from SPI Flash, adr is updated byte call  
-  switch(ch[3]){ // Intel record type
+  do_RL(&adr,*ch); // read from SPI Flash, adr is updated byte call  
+  switch((int)ch[3]){ // Intel record type
     case 0: // data record  L A A T (d*L) cksum
-      objAdr = ch[2];                   // parse off address offset
-      objAdr = (objAdr << 8) | ch[1];     // can address ever be ODD?
+      objAdr = (uint8_t)ch[2];                   // parse off address offset
+      objAdr = (objAdr << 8) | (uint8_t)ch[1];     // can address ever be ODD?
       x=4;                            // index were data starts
       while(ch[0]>0){
         if(oldPage!=((objAdr+extendA)&mask)){// write the page
@@ -1106,26 +1111,27 @@ do{
             do_spm((uint16_t)(oldPage&0xffff),__BOOT_PAGE_ERASE,0);
             do_spm((uint16_t)(oldPage&0xffff),__BOOT_PAGE_WRITE,0);
             }
-          oldPage = (objAdr+entendA)&mask;
+          oldPage = (objAdr+extendA)&mask;
           RAMPZ =(oldPage>>16)&0xff; // set Extended address for Fill operations, and next erase/write
           }
-        w = ch[x++];   // fill next word
-        w = w | (ch[x++]<<8);
+        w = (uint8_t)ch[(x++)+1];
+        w = w<<8 |(uint8_t)ch[x++];   // fill next word
         ch[0] -= 2;  // count down for each byte processed,  CAN LENGTH ever be ODD?
-        do_spm((uint16_t)(objAdr&0xFFFF),_BOOT_PAGE_FILL,w);
+        do_spm((uint16_t)(objAdr&0xFFFF),__BOOT_PAGE_FILL,w);
         objAdr += 2;
-        dirty=true;  // for Page_write
+        dirty=1;  // for Page_write
         }
       break;
     case 1: // end of file
       if(dirty){
-        do_spm(oldPage&0xffff),__BOOT_PAGE_ERASE,0);
-        do_spm(oldPage&0xffff),__BOOT_PAGE_WRITE,0);
+        do_spm((uint16_t)(oldPage&0xffff),__BOOT_PAGE_ERASE,0);
+        do_spm((uint16_t)(oldPage&0xffff),__BOOT_PAGE_WRITE,0);
        }
       appStart(1); // simulate Power-on Reset, do I need to worry about SP and other H/W init Status?
       break;
     case 2: // extended segment address L A A T d d cksum
-      extendA = ch[4]<<12;
+      extendA = (uint8_t)ch[4];
+      extendA = extendA<<12;
       break;
     default :;
     }// switch
